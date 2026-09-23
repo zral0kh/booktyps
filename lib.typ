@@ -7,10 +7,19 @@
 //  a heavy rule above and below it, and a light one under `table.header` and
 //  above `table.footer`. A table with neither gets just the two heavy rules.
 //
+//  Sizes are given in `em`, as booktabs gives its own, so that rules keep their
+//  weight against the text whatever size it is set at.
+//
 //  Where two rules meet, one gives way and stops short of the other. By
 //  default the thinner one gives way, which is what lets a sideways table built
 //  out of plain `table.hline` and `table.vline` keep the same look.
 // =============================================================================
+
+#import "@preview/uniwarn:0.1.1": warning
+
+/// This package's own warnings, which a document may silence by name with
+/// `uniwarn.disable-warnings("booktyps")`.
+#let _warn = warning.with(namespace: "booktyps", prefix: "[booktyps] ")
 
 /// How many columns a table has, given as a count or a list of track sizes.
 #let _column-count(columns) = if type(columns) == int {
@@ -41,10 +50,19 @@
   (top: value, bottom: value, left: value, right: value)
 }
 
-/// How thick a stroke draws, for deciding which of two rules wins.
+/// The inset a rule stops short by where it merely meets another, which is
+/// `meet` if the inset names one and the ordinary inset otherwise.
+#let _meet(value) = if type(value) == dictionary and "meet" in value {
+  _sides(value.meet)
+} else { _sides(value) }
+
+/// How thick a stroke draws, for deciding which of two rules gives way.
+///
+/// Resolved, since the sizes here default to `em` while a rule written by hand
+/// is as likely to be given in `pt`, and the two cannot be ordered unresolved.
 #let _thickness(value) = {
   let width = stroke(value).thickness
-  if width == auto { 1pt } else { width }
+  if width == auto { 1pt } else { width.to-absolute() }
 }
 
 /// Read a table's cells, rules, header and footer in one pass over its children.
@@ -113,20 +131,42 @@
   )
 }
 
+/// Split the blank space beside a rule at the distances things stop short by.
+///
+/// A stroke spans a whole track, so a rule can only stop short of another by
+/// some distance if the blank space is divided at that distance. Each piece
+/// records how far its near edge lies from the rule, which is what says whether
+/// a given rule reaches across it.
+///
+/// `floor` is space the rule takes regardless, which is how a horizontal rule
+/// keeps its booktabs air whether or not anything stops short of it.
+#let _split(distances, floor) = {
+  // Resolved first, since `em` and `pt` cannot be ordered against one another
+  // and two rules may well be given in different units. A show rule carries a
+  // context, so the font-relative ones can be settled here.
+  let sizes = (distances + (floor,))
+    .filter(d => d != none)
+    .map(d => d.to-absolute())
+  let total = sizes.fold(0pt, (a, b) => calc.max(a, b))
+  if total == 0pt { return () }
+  let cuts = sizes.filter(d => d > 0pt and d < total).dedup().sorted()
+  let pieces = ()
+  let near = 0pt
+  for cut in cuts + (total,) {
+    pieces.push((size: cut - near, near: near))
+    near = cut
+  }
+  pieces
+}
+
 /// Plan one axis of the grid as it will actually be laid out.
 ///
-/// A rule that has to be stopped short of gets blank tracks beside it, sized
-/// `before` and `after`. That is the only way to interrupt a rule at all: a
-/// cell stroke always spans its whole cell, so a rule can stop short of
-/// another only if some track in between carries no rule.
-///
-/// `boundaries` maps each authored boundary that carries a rule to whether it
-/// needs those blank tracks and how much air it wants on each side, since the
-/// air may be given per rule. Returns one entry per laid-out track, an authored
-/// index or the size of a blank one; where each rule ends up, keyed by the
-/// track whose leading edge draws it; which rule every blank track belongs to,
-/// since a rule has one on each side and a crossing rule must run through both;
-/// the boundary drawn on the very last trailing edge, if any; and that index.
+/// `boundaries` gives, for each authored boundary carrying a rule, the pieces
+/// of blank space on either side of it. Returns one entry per laid-out track,
+/// an authored index or the size of a blank piece; where each rule ends up,
+/// keyed by the track whose leading edge draws it; for every blank track the
+/// rule it belongs to, which side of it and how far from it; the boundary drawn
+/// on the very last trailing edge, if any; and that last index.
 #let _plan-axis(boundaries, count) = {
   let tracks = ()
   let rule-track = (:)
@@ -136,18 +176,28 @@
   for boundary in range(count + 1) {
     let rule = boundaries.at(str(boundary), default: none)
     if rule != none {
-      if rule.spaced {
-        if boundary > 0 {
-          belongs.insert(str(tracks.len()), boundary)
-          tracks.push(rule.before)
+      // Before the rule the pieces run outwards, so they are laid down in
+      // reverse: the one furthest from the rule comes first.
+      if boundary > 0 {
+        for piece in rule.before.rev() {
+          belongs.insert(
+            str(tracks.len()),
+            (at: boundary, near: piece.near, side: "before"),
+          )
+          tracks.push(piece.size)
         }
-        if boundary < count {
-          rule-track.insert(str(tracks.len()), boundary)
-          belongs.insert(str(tracks.len()), boundary)
-          tracks.push(rule.after)
-        } else { trailing = boundary }
-      } else if boundary < count {
+      }
+      if boundary < count {
+        // Whatever comes next carries the rule on its leading edge, whether
+        // that is the first blank piece or the content track itself.
         rule-track.insert(str(tracks.len()), boundary)
+        for piece in rule.after {
+          belongs.insert(
+            str(tracks.len()),
+            (at: boundary, near: piece.near, side: "after"),
+          )
+          tracks.push(piece.size)
+        }
       } else { trailing = boundary }
     }
     if boundary < count { tracks.push(boundary) }
@@ -171,9 +221,14 @@
 ///
 /// Placing a `table.hline` adds a light rule of your own, and `start` and `end`
 /// narrow it to some columns, the way booktabs' `\cmidrule` does. A
-/// `table.vline` runs down the table the same way. Where two rules meet, one
-/// gives way and stops short of the other, which is the part plain `table`
-/// strokes cannot express; `break-rule` names the one that gives way. A header or a
+/// `table.vline` runs down the table the same way, and several rules may share
+/// a boundary, which is booktabs setting two `\cmidrule`s on one alignment.
+///
+/// Where two rules cross, one gives way and stops short of the other, which is
+/// the part plain `table` strokes cannot express; `break-rule` names the one
+/// that gives way. Where a rule only runs up to another rather than past it,
+/// there is nothing to decide: whichever rule ends there stops short by `meet`,
+/// and one that carries on is left alone. A header or a
 /// footer keeps its own arguments, so whether it repeats across a page break
 /// stays `table.header(repeat: ..)`, as usual.
 /// 
@@ -211,33 +266,62 @@
 /// ```
 ///
 /// - heavy (stroke): The rule above and below the table, booktabs' `\toprule`
-///   and `\bottomrule`. Default is `0.9pt`. 
+///   and `\bottomrule`. Default is `0.08em`, booktabs' `\heavyrulewidth`. 
 ///   Set this to `0pt` if you are writing horizontal tables.
 ///
 /// - light (stroke): The rule under a header, above a footer, and for a
 ///   `table.hline` that sets no stroke of its own, booktabs' `\midrule`.
-///   Default is `0.5pt`.
+///   Default is `0.05em`, booktabs' `\lightrulewidth`.
 ///
 /// - vertical (stroke): The rule for a `table.vline` that sets no stroke of its
-///   own. Default is `0.4pt`.
+///   own. Default is `0.04em`, thinner than `light` so a horizontal
+///   rule wins a crossing between the two by default.
 ///
 /// - rule-inset (length, dictionary, function): How far a rule is held away
 ///   from what it divides, booktabs' `\aboverulesep`, and equally how far a
 ///   rule that loses a crossing stops short of the one that wins. Takes one
 ///   value for every side, or a dictionary keyed by `x` and `y`, or by `top`,
-///   `bottom`, `left` and `right`. Default is `2.7pt`. \
+///   `bottom`, `left` and `right`. Default is `0.27em`, measured off booktabs'
+///   own output, which sets `0.4ex` above a rule and `0.65ex` below it.
+///   Rules sharing a boundary share the one band of air, so where they ask for
+///   different amounts the widest wins; anything less would crowd the rule that
+///   asked for more.
+///
 ///   It also takes a function, `(x, y, rule)=>{..}`, 
 ///   giving each rule its own air. 
 ///   One of `x` and `y` is always `none`: a
 ///   horizontal rule has no column, a vertical one no row. `rule` is the rule
 ///   itself, so it can be read for its stroke. Return whatever the parameter
 ///   takes otherwise, and it applies to that rule alone. \
-///   Breaking a rule therefore costs room: the gap has to come from somewhere,
-///   so a table whose vertical rule runs through is wider by `left` plus
-///   `right` at that rule, just as every horizontal rule makes the table taller
-///   by `top` plus `bottom`. LaTeX's booktabs does the same. Only a vertical
-///   rule that something gives way to is spaced, so one that never wins a
-///   crossing costs nothing.
+///   The inset may also name `meet`, taking a value or a dictionary of its own,
+///   for the narrower gap a rule leaves where it merely runs up to another
+///   instead of being cut by it, as in `(x: 6pt, y: 3pt, meet: 1pt)`. It
+///   defaults to the ordinary inset, and `meet: 0pt` makes such rules run into
+///   each other and close up the corner.
+///
+///   Leaving a gap therefore costs room: it has to come from somewhere,
+///   so a table is wider at a vertical rule that anything stops short of, just
+///   as every horizontal rule makes it taller. A vertical rule that nothing
+///   gives way to costs no width at all.
+///
+/// - rule-steals-space (bool): Where the gap around a rule comes from. `false`,
+///   the default, adds it, so rules push the rows apart. `true` takes it out of
+///   the padding of the cells beside the rule instead, leaving the table the
+///   height it would have with no rules at all; where the padding cannot cover
+///   the gap, only the shortfall is added.
+///
+///   A single rule can be marked either way, whatever the table is set to, by
+///   labelling it `<steals-space>` or `<injects-space>`. A label has to be
+///   attached to the rule inside a content block, as in
+///   `[#table.hline()<steals-space>]`, since a table takes content and a bare
+///   label is not content. The rules read off the table's own structure carry
+///   no label, so they follow the table.
+///
+///   Rules sharing a boundary share the one gap, so they cannot disagree about
+///   where it comes from. Where they do, none of them steals, which can only
+///   ever leave the table larger rather than overlapping anything, and a
+///   warning says so. Silence it with
+///   `uniwarn.disable-warnings("booktyps")`.
 ///
 /// - break-rule (auto, function): Which of two rules is to break under the other. `auto` breaks the thinner one, and if both are equal the vertical one. Pass `table.hline` or
 ///   `table.vline` to always break that one, or a function
@@ -249,10 +333,11 @@
 ///
 /// -> content
 #let booktabs(
-  heavy: 0.9pt,
-  light: 0.5pt,
-  vertical: 0.4pt,
-  rule-inset: 2.7pt,
+  heavy: 0.08em,
+  light: 0.05em,
+  vertical: 0.04em,
+  rule-inset: 0.27em,
+  rule-steals-space: false,
   break-rule: auto,
   it,
 ) = {
@@ -260,12 +345,10 @@
     message: "The booktabs rule may only be applied to tables: `show table: booktabs`."
   )
   // Already transformed: the stroke is only ever a function once we made it one.
-  if type(it.stroke) == function { return it }
+  // Read through `fields`, since a table built by hand rather than handed over
+  // by a show rule carries only the arguments it was actually given.
+  if type(it.fields().at("stroke", default: none)) == function { return it }
 
-  // The air around a rule may be given per rule, so it is resolved for each.
-  let air-of(rule, x, y) = _sides(if type(rule-inset) == function {
-    rule-inset(x, y, rule.element)
-  } else { rule-inset })
   let ncols = _column-count(it.columns)
   let content = _read-table(it, ncols)
   let nrows = content.rows
@@ -289,32 +372,42 @@
     from-structure.push(structural(footer-start, light))
   }
 
-  let hrules = (:)
-  for rule in from-structure { hrules.insert(str(rule.at), rule) }
-  for rule in content.hlines {
-    hrules.insert(str(rule.at), (
+  // Several rules may share a boundary, the way booktabs sets two `\cmidrule`s
+  // on one vertical alignment, so each boundary holds a list. An authored rule
+  // joins the structural one rather than replacing it.
+  let gather(rules) = {
+    let by-boundary = (:)
+    for rule in rules {
+      let at = str(rule.at)
+      by-boundary.insert(at, by-boundary.at(at, default: ()) + (rule,))
+    }
+    by-boundary
+  }
+  let hrules = gather(
+    from-structure + content.hlines.map(rule => (
       ..rule,
       end: if rule.end == none { ncols } else { rule.end },
       stroke: if rule.stroke == auto { light } else { rule.stroke },
-    ))
-  }
-
-  let vrules = (:)
-  for rule in content.vlines {
-    vrules.insert(str(rule.at), (
+    )),
+  )
+  let vrules = gather(
+    content.vlines.map(rule => (
       ..rule,
       end: if rule.end == none { nrows } else { rule.end },
       stroke: if rule.stroke == auto { vertical } else { rule.stroke },
-    ))
-  }
+    )),
+  )
+  let every(by-boundary) = by-boundary.values().flatten()
 
   // Two rules cross only where each reaches past the other; meeting end to end
   // is not a crossing and needs no decision.
+  // Does a rule reach past the boundary the other one sits on? Reaching only
+  // as far as it is not a crossing: the two touch end to end, and since neither
+  // is in the other's way, neither gives way.
+  let spans-column(hrule, column) = hrule.start < column and column < hrule.end
+  let spans-row(vrule, row) = vrule.start < row and row < vrule.end
   let crosses(hrule, vrule) = (
-    hrule.start < vrule.at
-      and vrule.at < hrule.end
-      and vrule.start < hrule.at
-      and hrule.at < vrule.end
+    spans-column(hrule, vrule.at) and spans-row(vrule, hrule.at)
   )
   /// Which of two crossing rules is the one broken; the other runs through.
   let broken(hrule, vrule) = {
@@ -328,30 +421,136 @@
     }
   }
 
-  // A horizontal rule always gets its air, because booktabs sets one apart from
-  // the rows it divides whether or not anything crosses it. A vertical rule
-  // only needs air where it actually wins a crossing, and giving it any would
-  // widen the table, so it is only spaced where it has to be.
-  // Each rule keeps the air on its own sides: a horizontal rule's top and
-  // bottom, a vertical one's left and right. That air is what a crossing rule
-  // stops short by, so the gap a broken rule leaves is `rule-inset` either way.
-  let hline-spaced = (:)
-  for (at, hrule) in hrules {
-    let air = air-of(hrule, none, hrule.at)
-    hline-spaced.insert(at, (spaced: true, before: air.top, after: air.bottom))
+  // What a rule stops short by, on each of its own sides: `rule-inset` where it
+  // is cut by another, `meet` where it only runs up to one.
+  let cut-of(rule, x, y) = _sides(if type(rule-inset) == function {
+    rule-inset(x, y, rule.element)
+  } else { rule-inset })
+  let meet-of(rule, x, y) = _meet(if type(rule-inset) == function {
+    rule-inset(x, y, rule.element)
+  } else { rule-inset })
+  let widest(sizes) = if sizes.len() == 0 { 0pt } else { calc.max(..sizes) }
+
+  // A rule either adds its gap to the table or takes it out of the padding of
+  // the cells beside it. A label on the rule settles it, otherwise the table
+  // does. Rules the structure supplies carry no label, so they follow the table.
+  let steals(rule) = {
+    let marked = rule.element.fields().at("label", default: none)
+    if marked == <steals-space> { true } else if marked == <injects-space> {
+      false
+    } else { rule-steals-space }
   }
+  // What the cells have to give. A cell of its own overrides the table's.
+  let padding = _sides(it.fields().at("inset", default: 5pt))
+  let take(wanted, available) = calc.min(wanted, available)
+
+  // A blank track is where a rule that gives way stops short, so one is needed
+  // wherever any rule is cut or meets another, and it must be wide enough for
+  // every gap that lands in it. A horizontal rule also always takes its own
+  // air, since booktabs sets one apart from the rows it divides either way.
+  let notes = ()
+  // How far a rule stops short of the one it meets on a given side, or `none`
+  // where it does not reach that side at all. Running through is stopping short
+  // by nothing, which is what lets a rule cross a blank track unbroken.
+  let vline-stop(v, boundary, side) = {
+    let beside = hrules.at(str(boundary), default: ())
+    let reaches = beside.any(h => h.start <= v.at and v.at <= h.end)
+    if spans-row(v, boundary) {
+      if not beside.any(h => crosses(h, v) and broken(h, v) == table.vline) {
+        0pt
+      } else if side == "before" {
+        cut-of(v, v.at, none).bottom
+      } else { cut-of(v, v.at, none).top }
+    } else if reaches and side == "before" and v.end == boundary {
+      meet-of(v, v.at, none).bottom
+    } else if reaches and side == "after" and v.start == boundary {
+      meet-of(v, v.at, none).top
+    }
+  }
+  let hline-stop(h, boundary, side) = {
+    let beside = vrules.at(str(boundary), default: ())
+    let reaches = beside.any(v => v.start <= h.at and h.at <= v.end)
+    if spans-column(h, boundary) {
+      if not beside.any(v => crosses(h, v) and broken(h, v) == table.hline) {
+        0pt
+      } else if side == "before" {
+        cut-of(h, none, h.at).right
+      } else { cut-of(h, none, h.at).left }
+    } else if reaches and side == "before" and h.end == boundary {
+      meet-of(h, none, h.at).right
+    } else if reaches and side == "after" and h.start == boundary {
+      meet-of(h, none, h.at).left
+    }
+  }
+
+  let notes = ()
+  let shave-top = (:)
+  let shave-bottom = (:)
+  let shave-left = (:)
+  let shave-right = (:)
+
+  // A horizontal rule keeps its own air whatever happens around it; a vertical
+  // one takes only what something actually stops short by, so one that nothing
+  // gives way to costs the table no width.
+  let hline-spaced = (:)
+  for (at, rules) in hrules {
+    let boundary = int(at)
+    let air = rules.map(h => cut-of(h, none, h.at))
+    let stops(side) = every(vrules).map(v => vline-stop(v, boundary, side))
+    let gap = (
+      before: _split(stops("before"), widest(air.map(a => a.top))),
+      after: _split(stops("after"), widest(air.map(a => a.bottom))),
+    )
+
+    let wants = rules.map(steals)
+    let stealing = wants.all(w => w)
+    if not stealing and wants.any(w => w) {
+      notes.push(
+        "rules sharing row " + at + " disagree about stealing space, so none of "
+          + "them steals. Mark them all `<steals-space>`, or none of them, to "
+          + "settle it.",
+      )
+    }
+    if stealing {
+      let depth(pieces) = pieces.fold(0pt, (sum, piece) => sum + piece.size)
+      if boundary > 0 {
+        shave-bottom.insert(str(boundary - 1), take(depth(gap.before), padding.bottom))
+      }
+      if boundary < nrows {
+        shave-top.insert(str(boundary), take(depth(gap.after), padding.top))
+      }
+    }
+    hline-spaced.insert(at, gap)
+  }
+
   let vline-spaced = (:)
-  for (at, vrule) in vrules {
-    let air = air-of(vrule, vrule.at, none)
-    vline-spaced.insert(at, (
-      // A vertical rule only needs room where something actually gives way to
-      // it; one that never wins a crossing costs the table no width.
-      spaced: hrules.values().any(hrule => (
-        crosses(hrule, vrule) and broken(hrule, vrule) == table.hline
-      )),
-      before: air.left,
-      after: air.right,
-    ))
+  for (at, rules) in vrules {
+    let boundary = int(at)
+    let stops(side) = every(hrules).map(h => hline-stop(h, boundary, side))
+    let gap = (
+      before: _split(stops("before"), 0pt),
+      after: _split(stops("after"), 0pt),
+    )
+
+    let wants = rules.map(steals)
+    let stealing = wants.all(w => w)
+    if not stealing and wants.any(w => w) {
+      notes.push(
+        "rules sharing column " + at + " disagree about stealing space, so none "
+          + "of them steals. Mark them all `<steals-space>`, or none of them, to "
+          + "settle it.",
+      )
+    }
+    if stealing {
+      let depth(pieces) = pieces.fold(0pt, (sum, piece) => sum + piece.size)
+      if boundary > 0 {
+        shave-right.insert(str(boundary - 1), take(depth(gap.before), padding.right))
+      }
+      if boundary < ncols {
+        shave-left.insert(str(boundary), take(depth(gap.after), padding.left))
+      }
+    }
+    vline-spaced.insert(at, gap)
   }
 
   let rows-plan = _plan-axis(hline-spaced, nrows)
@@ -372,48 +571,71 @@
 
   let hrule-at(index) = hrules.at(
     str(rows-plan.rule-track.at(str(index), default: -1)),
-    default: none,
+    default: (),
   )
   let vrule-at(index) = vrules.at(
     str(cols-plan.rule-track.at(str(index), default: -1)),
-    default: none,
-  )
-  // Which rule a blank track sits beside, for deciding whether a crossing rule
-  // runs through it. Both of a rule's blank tracks answer with that rule.
-  let hrule-beside(index) = hrules.at(
-    str(rows-plan.belongs.at(str(index), default: -1)),
-    default: none,
-  )
-  let vrule-beside(index) = vrules.at(
-    str(cols-plan.belongs.at(str(index), default: -1)),
-    default: none,
+    default: (),
   )
 
-  let horizontal(hrule, x) = if hrule != none {
+  // A rule is drawn where it covers the track. Across a blank track it is drawn
+  // only once past the distance it stops short by, which is how a rule reaches
+  // part of the way into the air beside another.
+  let horizontal(rules, x) = {
     let track = cols-plan.tracks.at(x)
-    let through = if type(track) == int {
-      hrule.start <= track and track < hrule.end
+    let drawn = if type(track) == int {
+      rules.find(h => h.start <= track and track < h.end)
     } else {
-      let vrule = vrule-beside(x)
-      vrule != none and crosses(hrule, vrule) and broken(hrule, vrule) != table.hline
+      let here = cols-plan.belongs.at(str(x), default: none)
+      if here == none { none } else {
+        rules.find(h => {
+          let stop = hline-stop(h, here.at, here.side)
+          stop != none and stop.to-absolute() <= here.near
+        })
+      }
     }
-    if through { hrule.stroke }
+    if drawn != none { drawn.stroke }
   }
-  let vertical-at(vrule, y) = if vrule != none {
+  let vertical-at(rules, y) = {
     let track = rows-plan.tracks.at(y)
-    let through = if type(track) == int {
-      vrule.start <= track and track < vrule.end
+    let drawn = if type(track) == int {
+      rules.find(v => v.start <= track and track < v.end)
     } else {
-      let hrule = hrule-beside(y)
-      hrule != none and crosses(hrule, vrule) and broken(hrule, vrule) != table.vline
+      let here = rows-plan.belongs.at(str(y), default: none)
+      if here == none { none } else {
+        rules.find(v => {
+          let stop = vline-stop(v, here.at, here.side)
+          stop != none and stop.to-absolute() <= here.near
+        })
+      }
     }
-    if through { vrule.stroke }
+    if drawn != none { drawn.stroke }
+  }
+
+  // What a cell is left with once the rules beside it have taken their gap.
+  let shaved(cell) = {
+    let own = cell.body.fields().at("inset", default: none)
+    let base = if own == none { padding } else { _sides(own) }
+    let less = (
+      top: shave-top.at(str(cell.row), default: 0pt),
+      bottom: shave-bottom.at(str(cell.row), default: 0pt),
+      left: shave-left.at(str(cell.column), default: 0pt),
+      right: shave-right.at(str(cell.column), default: 0pt),
+    )
+    if less.values().all(amount => amount == 0pt) { return (:) }
+    (inset: (
+      top: base.top - less.top,
+      bottom: base.bottom - less.bottom,
+      left: base.left - less.left,
+      right: base.right - less.right,
+    ))
   }
 
   let place-cell(cell) = table.cell(
     x: placed-col.at(str(cell.column)),
     y: placed-row.at(str(cell.row)),
     .._options(cell.body, "x", "y", "body"),
+    ..shaved(cell),
     if cell.body.func() == table.cell { cell.body.body } else { cell.body },
   )
 
@@ -440,6 +662,7 @@
   }
   let sizes(plan) = plan.tracks.map(track => if type(track) == int { auto } else { track })
 
+  notes.map(_warn).join()
   table(
     rows: sizes(rows-plan),
     columns: sizes(cols-plan).enumerate().map(((index, size)) => if size != auto {

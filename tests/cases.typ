@@ -1,6 +1,16 @@
 // Shared setup. `tt` only collects files named `test.typ`, so this one is just
 // a module the tests import.
-#import "/lib.typ": booktabs
+#import "/lib.typ" as booktyps
+
+/// The package's sizes are given in `em`, so they would follow this suite's
+/// text size. The tests are about where the rules go rather than how thick the
+/// defaults are, so they are pinned here and quoted as plain lengths.
+#let booktabs = booktyps.booktabs.with(
+  heavy: 0.9pt,
+  light: 0.5pt,
+  vertical: 0.4pt,
+  rule-inset: 2.7pt,
+)
 
 /// A page that is only as tall as the table on it, so a reference image shows
 /// the table and nothing else.
