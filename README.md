@@ -158,7 +158,7 @@ are positional: the column and row the rules meet at, then the two instantiated 
 
 ## Examples
 
-See the [Github Examples](https://github.com/zral0kh/booktyps/tree/main/examples) for more use cases.
+See the [Github Examples](https://github.com/zral0kh/booktyps/tree/v0.1.0/examples) for more use cases.
  
 | file | shows |
 |---|---|
