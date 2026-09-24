@@ -107,7 +107,7 @@ widest wins — the band cannot be two heights at once:
 
 ## Where the Space Comes From
 
-A rule needs a gap either side of it, and that gap has to come from somewhere.
+A rule needs space either side of it, and that has to come from somewhere.
 By default it is added, so rules push the rows apart. With
 `rule-steals-space: true` a rule takes it out of the inset of the cells beside
 it instead, leaving the table the height it would have with no rules at all;
@@ -120,11 +120,15 @@ labelling it `<steals-space>` or `<injects-space>`. The label has to be attached
 inside a content block, since a table takes content and a bare label is not:
 
 ```typst
-[#table.hline()<steals-space>],   // works
-table.hline(), <steals-space>,    // error: expected content, found label
+#table(
+  columns: 2,
+  [a], [b],
+  [#table.hline()<steals-space>],  // the label rides on the rule
+  [c], [d],
+)
 ```
 
-Rules sharing a boundary share the one gap, so they cannot disagree about where it comes from. We warn off this via `uniwarn`. You can disable our warnings via `#uniwarn.disable-warnings("booktyps")` after importing the uniwarn package.
+Rules sharing a row/column share the one gap, so they cannot disagree about where it comes from. We warn of this via `uniwarn`. You can disable our warnings via `#uniwarn.disable-warnings("booktyps")` after importing the uniwarn package.
 
 ## Options
 
@@ -132,38 +136,30 @@ Rules sharing a boundary share the one gap, so they cannot disagree about where 
 
 | option | default | what it does |
 |---|---|---|
-| `heavy` | `0.08em` | the rule above and below the table, `\toprule`/`\bottomrule` |
-| `light` | `0.05em` | the rule under a header, above a footer, and for a bare `table.hline`, `\midrule` |
-| `vertical` | `0.04em` | the rule for a bare `table.vline`; thinner than `light`, so a horizontal rule wins a crossing by default |
+| `heavy` | `0.08em` | the default rule strength above and below the table, `\toprule`/`\bottomrule` |
+| `light` | `0.05em` | the default rule strength under a header, above a footer, and for a bare `table.hline`, `\midrule` |
+| `vertical` | `0.04em` | the default rule strength for a bare `table.vline`; thinner than `light`, so a horizontal rule wins a crossing by default |
 | `rule-inset` | `0.27em` | how far a rule is held from what it divides, and how far a rule that gives way stops short |
-| `rule-steals-space` | `false` | whether a rule's gap is added to the table or taken from the cells beside it |
+| `rule-steals-space` | `false` | whether a rule's gap is taken from the cells' inset beside it instead of added to the table |
 | `break-rule` | `auto` | which of two crossing rules breaks |
-
-The two that take more than a length:
 
 **`rule-inset`** accepts one value for every side, a dictionary keyed by `x`/`y`
 or by `top`/`bottom`/`left`/`right`, or a function `(x, y, rule) => ..` giving
-each rule its own air — one of `x`/`y` is always `none`, which is also how to
-tell a horizontal rule from a vertical one. The dictionary may carry a `meet`
-key for the narrower gap where rules only touch.
+each rule its own air. Note that one of `x`/`y` is always `none` because lines are fixed in one dimension. The function may return a value or a dictionary.
+In general the dictionary may also carry a key `meet` with its own value or dict which overrides the normal inset in case a line just touches, but does not cross another one.
 
-Leaving a gap costs room: it has to come from somewhere, so a table is wider at
-a vertical rule that anything stops short of, just as every horizontal rule
-makes it taller. A vertical rule that nothing gives way to costs no width.
+Rules generally cost space. Whether that is injected or taken from the cells is controlled by setting `rule-steals-space`.
 
 **`break-rule`** takes `auto` (break the thinner rule, the vertical one on a
 tie), `table.hline` or `table.vline` to always break that direction, or a
-function `(x, y, hl, vl) => ..` returning one of those two. All four arguments
-are positional: the column and row the rules meet at, then the two rules
-themselves, so a function can branch on `hl.stroke`.
+function `(x, y, hl, vl) => ..` returning either `table.hline` or `table.vline` to decide the special case. All four arguments
+are positional: the column and row the rules meet at, then the two instantiated rules themselves.
 
-A header or footer keeps its own arguments, so `repeat: ..` on
-`table.header`/`table.footer` still works as usual.
 
 ## Examples
 
-Runnable and commented, each rendered into `assets/`:
-
+See the [Github Examples](https://github.com/zral0kh/booktyps/tree/main/examples) for more use cases.
+ 
 | file | shows |
 |---|---|
 | `simple.typ` | the whole setup |
