@@ -61,6 +61,7 @@
 /// Resolved, since the sizes here default to `em` while a rule written by hand
 /// is as likely to be given in `pt`, and the two cannot be ordered unresolved.
 #let _thickness(value) = {
+  if value == none { return 0pt }
   let width = stroke(value).thickness
   if width == auto { 1pt } else { width.to-absolute() }
 }
@@ -383,19 +384,20 @@
     }
     by-boundary
   }
+  let drawn(rules) = rules.filter(rule => rule.stroke != none)
   let hrules = gather(
-    from-structure + content.hlines.map(rule => (
+    drawn(from-structure + content.hlines.map(rule => (
       ..rule,
       end: if rule.end == none { ncols } else { rule.end },
       stroke: if rule.stroke == auto { light } else { rule.stroke },
-    )),
+    ))),
   )
   let vrules = gather(
-    content.vlines.map(rule => (
+    drawn(content.vlines.map(rule => (
       ..rule,
       end: if rule.end == none { nrows } else { rule.end },
       stroke: if rule.stroke == auto { vertical } else { rule.stroke },
-    )),
+    ))),
   )
   let every(by-boundary) = by-boundary.values().flatten()
 
