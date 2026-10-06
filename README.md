@@ -8,6 +8,8 @@ proper breaking of rules where they cross. Use native Typst table syntax: `table
 ## Usage
 
 ```typst
+#import "@preview/booktyps:0.1.0": booktabs
+
 #show table: booktabs
 // the code for the image above
 #table(
@@ -20,8 +22,8 @@ proper breaking of rules where they cross. Use native Typst table syntax: `table
 )
 ```
 
-`#show table: booktabs` is the whole setup. The rules are read off the
-table's own structure:
+After importing `booktabs`, `#show table: booktabs` is the whole setup. The rules
+are read off the table's own structure:
 
 - a [heavy](#options) rule above and below the whole table
 - a [light](#optons) rule under `table.header` and above `table.footer`
