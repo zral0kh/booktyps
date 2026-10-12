@@ -68,10 +68,14 @@
 
 /// Read a table's cells, rules, header and footer in one pass over its children.
 ///
-/// Returns the cells as `(column, row, body)`, the rules the author placed with
-/// the element each came from, the row the header ends before and the row the
-/// footer starts at, each with that part's own arguments so that `repeat` and
-/// the like survive, and the number of rows.
+/// Returns the cells as `(column, row, colspan, rowspan, body)`, the rules the
+/// author placed with the element each came from, the row the header ends
+/// before and the row the footer starts at, each with that part's own arguments
+/// so that `repeat` and the like survive, and the number of rows.
+///
+/// Cells are placed the way the table places them: into the next free slot,
+/// skipping the ones a span from an earlier cell already covers, unless the cell
+/// names both its `x` and `y`.
 #let _read-table(it, ncols) = {
   let cells = ()
   let hlines = ()
@@ -80,11 +84,16 @@
   let footer = none
   let column = 0
   let row = 0
+  let taken = (:)
+  // The lowest row any cell reaches into, which a rowspan can push below the
+  // row the cursor is on.
+  let reach = 0
 
   for child in it.children {
     let part = child.func()
     let grouped = part in (table.header, table.footer)
     let first-row = row
+    let part-reach = row
 
     for cell in if grouped { child.children } else { (child,) } {
       if cell.func() == table.hline {
@@ -106,16 +115,51 @@
           element: cell,
         ))
       } else {
-        cells.push((column: column, row: row, body: cell))
-        column += if cell.func() == table.cell {
-          cell.fields().at("colspan", default: 1)
-        } else { 1 }
-        while column >= ncols { column -= ncols; row += 1 }
+        let fields = if cell.func() == table.cell { cell.fields() } else { (:) }
+        let colspan = fields.at("colspan", default: 1)
+        let rowspan = fields.at("rowspan", default: 1)
+        let at-x = fields.at("x", default: auto)
+        let at-y = fields.at("y", default: auto)
+        let pinned = at-x != auto and at-x != none and at-y != auto and at-y != none
+
+        let (x, y) = if pinned { (at-x, at-y) } else {
+          // Step over what an earlier span already covers.
+          while str(row) + "," + str(column) in taken {
+            column += 1
+            if column >= ncols { column = 0; row += 1 }
+          }
+          (column, row)
+        }
+        for covered-row in range(y, y + rowspan) {
+          for covered-column in range(x, x + colspan) {
+            taken.insert(str(covered-row) + "," + str(covered-column), true)
+          }
+        }
+        cells.push((
+          column: x,
+          row: y,
+          colspan: colspan,
+          rowspan: rowspan,
+          body: cell,
+        ))
+        part-reach = calc.max(part-reach, y + rowspan)
+        reach = calc.max(reach, y + rowspan)
+
+        // A cell given its own position leaves the cursor where it was.
+        if not pinned {
+          column += colspan
+          while column >= ncols { column -= ncols; row += 1 }
+        }
       }
     }
 
+    // Where the cursor stands, or further if a span runs past it.
+    let cursor = row + if column > 0 { 1 } else { 0 }
     if part == table.header {
-      header = (end: row, options: _options(child, "children"))
+      header = (
+        end: calc.max(cursor, part-reach),
+        options: _options(child, "children"),
+      )
     }
     if part == table.footer {
       footer = (start: first-row, options: _options(child, "children"))
@@ -128,7 +172,7 @@
     vlines: vlines,
     header: header,
     footer: footer,
-    rows: row + if column > 0 { 1 } else { 0 },
+    rows: calc.max(reach, row + if column > 0 { 1 } else { 0 }),
   )
 }
 
@@ -620,9 +664,9 @@
     let base = if own == none { padding } else { _sides(own) }
     let less = (
       top: shave-top.at(str(cell.row), default: 0pt),
-      bottom: shave-bottom.at(str(cell.row), default: 0pt),
+      bottom: shave-bottom.at(str(cell.row + cell.rowspan - 1), default: 0pt),
       left: shave-left.at(str(cell.column), default: 0pt),
-      right: shave-right.at(str(cell.column), default: 0pt),
+      right: shave-right.at(str(cell.column + cell.colspan - 1), default: 0pt),
     )
     if less.values().all(amount => amount == 0pt) { return (:) }
     (inset: (
@@ -633,22 +677,60 @@
     ))
   }
 
+  // A span covers the blank tracks lying inside it as well as the authored ones,
+  // so it is counted again in the laid-out grid.
+  let placed-span(cell) = (
+    colspan: placed-col.at(str(cell.column + cell.colspan - 1))
+      - placed-col.at(str(cell.column)) + 1,
+    rowspan: placed-row.at(str(cell.row + cell.rowspan - 1))
+      - placed-row.at(str(cell.row)) + 1,
+  )
   let place-cell(cell) = table.cell(
     x: placed-col.at(str(cell.column)),
     y: placed-row.at(str(cell.row)),
-    .._options(cell.body, "x", "y", "body"),
+    .._options(cell.body, "x", "y", "body", "colspan", "rowspan"),
+    ..placed-span(cell),
     ..shaved(cell),
     if cell.body.func() == table.cell { cell.body.body } else { cell.body },
   )
+
+  // How far each cell reaches in the laid-out grid, by where it starts, so the
+  // table's outer rules can be drawn on the edge a spanning cell ends at.
+  let extent = (:)
+  for cell in content.cells {
+    extent.insert(
+      str(placed-col.at(str(cell.column))) + "," + str(placed-row.at(str(cell.row))),
+      placed-span(cell),
+    )
+  }
+  let extent-at(x, y) = extent.at(
+    str(x) + "," + str(y),
+    default: (colspan: 1, rowspan: 1),
+  )
+  // The first column of a laid-out row that no cell covers, which is where a
+  // placeholder can sit without landing on a span.
+  let free-column(y) = {
+    let covered(x) = content.cells.any(cell => {
+      let span = placed-span(cell)
+      let cx = placed-col.at(str(cell.column))
+      let cy = placed-row.at(str(cell.row))
+      cx <= x and x < cx + span.colspan and cy <= y and y < cy + span.rowspan
+    })
+    range(cols-plan.tracks.len()).find(x => not covered(x))
+  }
 
   // A header and a footer take their own rules with them when they repeat, so
   // each reaches as far as the blank tracks around its rule. Those tracks hold
   // no cell of their own, so they need one to belong to either. A blank track
   // is the gap itself, so it takes none of the table's padding.
-  let spacer-anchor(row) = table.cell(x: 0, y: row, inset: 0pt, [])
+  let spacer-anchor(row) = {
+    let free = free-column(row)
+    if free == none { () } else { (table.cell(x: free, y: row, inset: 0pt, []),) }
+  }
   let anchors(rows) = rows
     .filter(row => type(rows-plan.tracks.at(row)) != int)
     .map(spacer-anchor)
+    .flatten()
   let head-until = if header-end == none { 0 } else {
     placed-row.at(str(header-end), default: rows-plan.tracks.len())
   }
@@ -674,11 +756,13 @@
     } else { auto }),
     stroke: (x, y) => (
       top: horizontal(hrule-at(y), x),
-      bottom: if y == rows-plan.last and rows-plan.trailing != none {
+      bottom: if y + extent-at(x, y).rowspan - 1 == rows-plan.last
+        and rows-plan.trailing != none {
         horizontal(hrules.at(str(rows-plan.trailing)), x)
       },
       left: vertical-at(vrule-at(x), y),
-      right: if x == cols-plan.last and cols-plan.trailing != none {
+      right: if x + extent-at(x, y).colspan - 1 == cols-plan.last
+        and cols-plan.trailing != none {
         vertical-at(vrules.at(str(cols-plan.trailing)), y)
       },
     ),
