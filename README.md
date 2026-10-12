@@ -34,6 +34,9 @@ it to some columns, like booktabs' `\cmidrule`. A `table.vline` runs down the ta
 
 No cell inset is applied — set your own with `set table(inset: ..)`.
 
+The table's own `stroke` is ignored: only the rules above are drawn, so a
+`set table(stroke: ..)` has no effect. A cell's own `stroke` is left alone.
+
 Sizes are given in `em`, as booktabs gives its own, so rules keep their weight
 against the text at any size. booktabs sets less air above a rule than below it
 (`\aboverulesep` `0.4ex`, `\belowrulesep` `0.65ex`); our default `0.27em` is the same either side. The `booktabs-original` example sets booktabs' own asymmetric values if you want them.
@@ -132,6 +135,38 @@ inside a content block, since a table takes content and a bare label is not:
 
 Rules sharing a row/column share the one gap, so they cannot disagree about where it comes from. We warn of this via `uniwarn`. You can disable our warnings via `#uniwarn.disable-warnings("booktyps")` after importing the uniwarn package.
 
+## Special Handling of Gutters
+
+`column-gutter` and `row-gutter` do what they do on any table, and an array still
+repeats its last entry. The rules run straight through the gutters. A stroke on
+the cells can't do that: it stops at every gutter and cuts the top rule into
+pieces.
+
+![Gutters](./assets/gutters.png)
+
+```typst
+#table(
+  columns: 3,
+  column-gutter: 14pt,
+  table.vline(x: 1),  // goes in the middle of the first gutter
+  table.header([*Language*], [*Typed*], [*Year*]),
+  [Typst], [yes], [2019],
+  [TeX],   [no],  [1978],
+)
+```
+
+A rule that stands in a gutter sits in the middle of it, and the two halves are
+where other rules meet it. A rule that gives way stops short by `rule-inset`. One
+that only runs up to it stops short by `meet`, so `meet: 0pt` closes a box even
+across a gutter.
+
+The gutter counts as room, like the cell inset does. Normally a rule's air is
+added on top of it. With `rule-steals-space: true` the air comes out of the
+gutter first and only then out of the inset.
+
+Fills stop at gutters. A gutter that isn't a length, like `1fr` or `10%`, can't be
+halved around a rule, so it is dropped at that rule and you get a warning.
+
 ## Options
 
 `#show table: booktabs.with(..)` binds any of these.
@@ -143,6 +178,7 @@ Rules sharing a row/column share the one gap, so they cannot disagree about wher
 | `vertical` | `0.04em` | the default rule strength for a bare `table.vline`; thinner than `light`, so a horizontal rule wins a crossing by default |
 | `rule-inset` | `0.27em` | how far a rule is held from what it divides, and how far a rule that gives way stops short |
 | `rule-steals-space` | `false` | whether a rule's gap is taken from the cells' inset beside it instead of added to the table |
+| `vertical-space` | `false` | whether every vertical rule keeps its `rule-inset` air, as a horizontal one does, instead of only when it breaks something |
 | `break-rule` | `auto` | which of two crossing rules breaks |
 
 **`rule-inset`** accepts one value for every side, a dictionary keyed by `x`/`y`
@@ -170,3 +206,4 @@ See the [Github Examples](https://github.com/zral0kh/booktyps/tree/v0.1.0/exampl
 | `crossing-rules.typ` | crossing versus merely touching |
 | `complex.typ` | a thicker vertical rule winning against the horizontal ones |
 | `spacing.typ` | adding the gap versus taking it from the cells |
+| `gutters.typ` | column gutters, with and without a rule standing in one |

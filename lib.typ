@@ -21,25 +21,70 @@
 /// `uniwarn.disable-warnings("booktyps")`.
 #let _warn = warning.with(namespace: "booktyps", prefix: "[booktyps] ")
 
+/// The `stroke` of every table `booktabs` returns, which is how that table is
+/// told apart from one still to be transformed when the show rule meets it again.
+///
+/// The table this function returns goes back through the show rule that produced
+/// it, and through any other rule on `table`, so it has to be recognised and
+/// handed back as it is; transformed again, it is built from its own output and
+/// each pass is bigger than the one before, which exhausts memory long before
+/// Typst's limit on recursion is reached. Functions compare by identity, so this
+/// one is nothing a table is given by anyone else, a `stroke` function of the
+/// author's included, and it is set after everything else passed on to the table,
+/// so that nothing passed on can displace it.
+#let _output-stroke = (x, y) => none
+
 /// How many columns a table has, given as a count or a list of track sizes.
 #let _column-count(columns) = if type(columns) == int {
   columns
 } else if type(columns) == array { columns.len() } else { 1 }
 
-/// An element's settable arguments, without the ones named.
+/// Spell a track specification out as one size for each of `count` tracks.
+///
+/// Typst repeats the last size of an array for every track past its end, so the
+/// grid built here, which has tracks of its own between the authored ones, has
+/// to be given the sizes in full; left to repeat, they would land on the wrong
+/// tracks. Typst hands over even a single size or a count of tracks as an array,
+/// so only a table with no sizes given at all is not one: that is `fallback` for
+/// every track, as an empty array is. A track is `auto` unless it is a gutter, to
+/// which no size means none.
+#let _track-sizes(spec, count, fallback: auto) = {
+  if type(spec) == array and spec.len() > 0 {
+    range(count).map(index => spec.at(calc.min(index, spec.len() - 1)))
+  } else { (fallback,) * count }
+}
+
+/// Half of a gutter, which is what lies each side of a rule standing in it, as
+/// an absolute length; or `none` if it is not one that can be halved. `auto`
+/// is nothing, and a fraction or a percentage of the table cannot be split in
+/// two before the table is laid out.
+#let _half-gap(gap) = {
+  let size = if type(gap) == relative {
+    if gap.ratio == 0% { gap.length } else { return none }
+  } else { gap }
+  if type(size) == length { size.to-absolute() / 2 } else if gap == auto { 0pt } else { none }
+}
+
+/// An element's settable arguments, without the ones named. Its label is never
+/// one of them: a label is not an argument, and the element is rebuilt here, so
+/// one handed on would be refused. Nor is it put back on the rebuilt element:
+/// the label stays with the element being shown, which is what a query or a rule
+/// on that label finds, and a second one on the result would be found as well.
 #let _options(element, ..without) = {
   let options = element.fields()
-  for name in without.pos() { let _ = options.remove(name, default: none) }
+  for name in ("label",) + without.pos() { let _ = options.remove(name, default: none) }
   options
 }
 
 /// Spell an inset out as all four sides.
 ///
 /// Takes a single value for every side, or a dictionary keyed by `x` and `y`,
-/// or by the sides themselves, which win where both are given.
+/// or by the sides themselves, which win where both are given, with `rest` for
+/// whatever none of those names.
 #let _sides(value) = if type(value) == dictionary {
-  let x = value.at("x", default: 0pt)
-  let y = value.at("y", default: 0pt)
+  let rest = value.at("rest", default: 0pt)
+  let x = value.at("x", default: rest)
+  let y = value.at("y", default: rest)
   (
     top: value.at("top", default: y),
     bottom: value.at("bottom", default: y),
@@ -92,6 +137,8 @@
   for child in it.children {
     let part = child.func()
     let grouped = part in (table.header, table.footer)
+    // A header or a footer takes whole rows, so it starts on a fresh one.
+    if grouped and column > 0 { column = 0; row += 1 }
     let first-row = row
     let part-reach = row
 
@@ -153,13 +200,15 @@
       }
     }
 
-    // Where the cursor stands, or further if a span runs past it.
-    let cursor = row + if column > 0 { 1 } else { 0 }
+    // What follows a header or a footer starts a fresh row below it, which a row
+    // it did not finish is left blank for, and below whatever a span in it
+    // reaches into.
+    if grouped {
+      if column > 0 { column = 0; row += 1 }
+      row = calc.max(row, part-reach)
+    }
     if part == table.header {
-      header = (
-        end: calc.max(cursor, part-reach),
-        options: _options(child, "children"),
-      )
+      header = (end: row, options: _options(child, "children"))
     }
     if part == table.footer {
       footer = (start: first-row, options: _options(child, "children"))
@@ -211,7 +260,7 @@
 /// an authored index or the size of a blank piece; where each rule ends up,
 /// keyed by the track whose leading edge draws it; for every blank track the
 /// rule it belongs to, which side of it and how far from it; the boundary drawn
-/// on the very last trailing edge, if any; and that last index.
+/// on the very last trailing edge, if any.
 #let _plan-axis(boundaries, count) = {
   let tracks = ()
   let rule-track = (:)
@@ -227,7 +276,12 @@
         for piece in rule.before.rev() {
           belongs.insert(
             str(tracks.len()),
-            (at: boundary, near: piece.near, side: "before"),
+            (
+              at: boundary,
+              near: piece.near,
+              side: "before",
+              gutter: piece.at("gutter", default: false),
+            ),
           )
           tracks.push(piece.size)
         }
@@ -239,7 +293,12 @@
         for piece in rule.after {
           belongs.insert(
             str(tracks.len()),
-            (at: boundary, near: piece.near, side: "after"),
+            (
+              at: boundary,
+              near: piece.near,
+              side: "after",
+              gutter: piece.at("gutter", default: false),
+            ),
           )
           tracks.push(piece.size)
         }
@@ -253,8 +312,54 @@
     rule-track: rule-track,
     belongs: belongs,
     trailing: trailing,
-    last: tracks.len() - 1,
   )
+}
+
+/// The authored rows or columns a laid-out track stands for: itself if it is
+/// one, or the two it lies between if it is blank space a rule added.
+#let _neighbours(plan, index, count) = {
+  let track = plan.tracks.at(index)
+  if type(track) == int { return (track,) }
+  let at = plan.belongs.at(str(index)).at
+  (at - 1, at).filter(authored => 0 <= authored and authored < count)
+}
+
+/// Whether a laid-out track is the room beside a rule that the author's gutter
+/// became, which is no cell's and so is never filled.
+#let _is-gutter(plan, index) = (
+  plan.belongs.at(str(index), default: (:)).at("gutter", default: false)
+)
+
+/// Make a per-cell setting of the table answer in the table's own coordinates.
+///
+/// `fill`, `align` and `inset` may be a function of the cell's column and row,
+/// or an array over the columns. Both were written against the table as the
+/// author sees it, and the grid built here has blank tracks in it, so they have
+/// to be asked about the authored cell instead. A track that is blank space
+/// takes what the cells either side of it agree on, which keeps a column's fill
+/// running through the gap a rule leaves, and `neutral` where they differ. The
+/// fill therefore stops where a rule does, rather than running past it into the
+/// gap. A track that is a gutter takes `neutral` whatever they say, as a gutter
+/// Typst leaves open is not filled either. Anything else, such as a single
+/// value, is returned as it is, unless `every` asks for it to be answered for
+/// too, which is how a single value is kept out of the gutters.
+#let _remap(value, rows-plan, cols-plan, nrows, ncols, neutral, every: false) = {
+  let read = if type(value) == function { value } else if type(value) == array {
+    (x, y) => value.at(calc.rem(x, value.len()))
+  } else if every { (x, y) => value } else { return value }
+
+  (x, y) => {
+    if _is-gutter(cols-plan, x) or _is-gutter(rows-plan, y) { return neutral }
+    let answers = ()
+    for column in _neighbours(cols-plan, x, ncols) {
+      for row in _neighbours(rows-plan, y, nrows) {
+        answers.push(read(column, row))
+      }
+    }
+    if answers.all(answer => answer == answers.first()) {
+      answers.first()
+    } else { neutral }
+  }
 }
 
 /// Give a table the booktabs look.
@@ -279,6 +384,10 @@
 /// 
 /// No inset is applied so write your own. The booktabs default inset is `2.7pt`.
 ///
+/// The table's own `stroke` is ignored: the rules are the ones read off its
+/// structure and the `table.hline`s and `table.vline`s placed in it, and nothing
+/// else is drawn. A cell's own `stroke` is left alone.
+///
 /// Example:
 /// ```typ
 /// #import "@preview/booktyps:0.1.0": booktabs
@@ -296,6 +405,14 @@
 ///   table.footer([*Total*], [], [3]),
 /// )
 /// ```
+///
+/// The author's `column-gutter` and `row-gutter` are kept, an array repeating its
+/// last size as it does for any table. Where no rule stands in a gutter it is
+/// Typst's own, and the rules run across it unbroken. A rule that does stand in
+/// one is centred in it, and its half of the gutter is room that the rules meet
+/// in. A gutter is nobody's cell, so no `fill` reaches it. One that is not a
+/// length, a fraction or a share of the table, cannot be halved around a rule,
+/// so none is kept there, and a warning says so.
 ///
 /// A table laid out sideways has no header to read a rule off, so draw the
 /// rules yourself and let the thinner ones give way:
@@ -368,6 +485,21 @@
 ///   warning says so. Silence it with
 ///   `uniwarn.disable-warnings("booktyps")`.
 ///
+///   A `column-gutter` or `row-gutter` the author gave is room beside a rule as
+///   the padding is, and it is used up before the padding is: a rule standing in
+///   it takes half of it each side, the rule's gap is taken out of that first
+///   and out of the padding only for what it cannot hold, and the table is as
+///   wide or as tall as it would be with no rule. Without stealing, the gap is
+///   added to the gutter.
+///
+/// - vertical-space (bool): Whether a vertical rule keeps the air `rule-inset`
+///   gives it either side, as every horizontal rule does. `false`, the default,
+///   gives a vertical rule room only where something stops short of it, so one
+///   that nothing gives way to costs no width and sits against the cells beside
+///   it. `true` holds every vertical rule away from them, which makes the gap
+///   the same whether or not another rule breaks at it. It follows
+///   `rule-steals-space` for where the room comes from.
+///
 /// - break-rule (auto, function): Which of two rules is to break under the other. `auto` breaks the thinner one, and if both are equal the vertical one. Pass `table.hline` or
 ///   `table.vline` to always break that one, or a function
 ///   `(x, y, hl, vl)` taking the column and row the two meet at and the two
@@ -383,16 +515,17 @@
   vertical: 0.04em,
   rule-inset: 0.27em,
   rule-steals-space: false,
+  vertical-space: false,
   break-rule: auto,
   it,
 ) = {
   assert( it.func() == table, 
     message: "The booktabs rule may only be applied to tables: `show table: booktabs`."
   )
-  // Already transformed: the stroke is only ever a function once we made it one.
-  // Read through `fields`, since a table built by hand rather than handed over
-  // by a show rule carries only the arguments it was actually given.
-  if type(it.fields().at("stroke", default: none)) == function { return it }
+  // Already transformed. Read through `fields`, since a table built by hand
+  // rather than handed over by a show rule carries only the arguments it was
+  // actually given.
+  if it.fields().at("stroke", default: none) == _output-stroke { return it }
 
   let ncols = _column-count(it.columns)
   let content = _read-table(it, ncols)
@@ -486,9 +619,46 @@
       false
     } else { rule-steals-space }
   }
-  // What the cells have to give. A cell of its own overrides the table's.
-  let padding = _sides(it.fields().at("inset", default: 5pt))
+  // What a cell has to give: its own inset if it has one, otherwise the
+  // table's, which may be a function of the cell's authored column and row.
+  // Resolved, so that a gap in `pt` can be weighed against a padding in `em`.
+  // An inset is a relative length, whose percentage cannot be weighed against
+  // a gap, so only its length counts.
+  let table-inset = it.fields().at("inset", default: 5pt)
+  let padding-of(cell) = {
+    let own = cell.body.fields().at("inset", default: none)
+    let value = if own != none { own } else if type(table-inset) == function {
+      table-inset(cell.column, cell.row)
+    } else { table-inset }
+    let sides = _sides(value)
+    for (side, size) in sides {
+      sides.insert(side, if type(size) == relative {
+        size.length.to-absolute()
+      } else if type(size) == length { size.to-absolute() } else { size })
+    }
+    sides
+  }
   let take(wanted, available) = calc.min(wanted, available)
+
+  // What a row or column can give at a rule is what its tightest cell has, since
+  // the whole row gives the same amount. A cell takes its place in the row it
+  // starts in for the top, the row it ends in for the bottom, and likewise for
+  // the sides.
+  let room-top = (:)
+  let room-bottom = (:)
+  let room-left = (:)
+  let room-right = (:)
+  let tighten(room, key, amount) = {
+    room.insert(key, calc.min(room.at(key, default: amount), amount))
+    room
+  }
+  for cell in content.cells {
+    let padding = padding-of(cell)
+    room-top = tighten(room-top, str(cell.row), padding.top)
+    room-bottom = tighten(room-bottom, str(cell.row + cell.rowspan - 1), padding.bottom)
+    room-left = tighten(room-left, str(cell.column), padding.left)
+    room-right = tighten(room-right, str(cell.column + cell.colspan - 1), padding.right)
+  }
 
   // A blank track is where a rule that gives way stops short, so one is needed
   // wherever any rule is cut or meets another, and it must be wide enough for
@@ -535,6 +705,45 @@
   let shave-left = (:)
   let shave-right = (:)
 
+  // The gutters the author asked for, one for each gap between neighbouring
+  // rows or columns and spelt out in full, so that none is left to repeat itself
+  // onto the blank tracks the rules add. The gap after the authored track `n`
+  // is the one at the boundary `n + 1`.
+  let gutters-of(name, count) = _track-sizes(
+    it.fields().at(name, default: ()), calc.max(count - 1, 0), fallback: 0pt,
+  )
+  let column-gutters = gutters-of("column-gutter", ncols)
+  let row-gutters = gutters-of("row-gutter", nrows)
+  let gutter-at(gutters, boundary, count) = {
+    if 1 <= boundary and boundary < count { gutters.at(boundary - 1) } else { 0pt }
+  }
+
+  let depth(pieces) = pieces.fold(0pt, (sum, piece) => sum + piece.size)
+  // The author's gutter is room beside a rule as the padding of the cells is. A
+  // rule standing in it takes half of it each side, and its air is either added
+  // to that or taken out of it, as `rule-steals-space` has it: stealing uses up
+  // the gutter before the padding, so only what the gutter cannot hold is left to
+  // take from the cells, and whatever the cells cannot give is added after all.
+  // The room lies outside the air, away from the rule, and a rule that reaches
+  // that far is drawn across it.
+  let seat(gap, half, stealing) = {
+    let air = (before: depth(gap.before), after: depth(gap.after))
+    let room(side) = {
+      let size = if stealing { calc.max(half - air.at(side), 0pt) } else { half }
+      if size > 0pt { ((size: size, near: air.at(side), gutter: true),) } else { () }
+    }
+    (
+      gap: (
+        before: gap.before + room("before"),
+        after: gap.after + room("after"),
+      ),
+      from-cells: (
+        before: calc.max(air.before - half, 0pt),
+        after: calc.max(air.after - half, 0pt),
+      ),
+    )
+  }
+
   // A horizontal rule keeps its own air whatever happens around it; a vertical
   // one takes only what something actually stops short by, so one that nothing
   // gives way to costs the table no width.
@@ -557,25 +766,40 @@
           + "settle it.",
       )
     }
+    let size = gutter-at(row-gutters, boundary, nrows)
+    let half = _half-gap(size)
+    if half == none {
+      notes.push(
+        "the row-gutter " + repr(size) + " between rows " + str(boundary) + " and "
+          + str(boundary + 1) + " is not a length, which cannot be split around a "
+          + "rule, so none is kept there.",
+      )
+      half = 0pt
+    }
+    let seated = seat(gap, half, stealing)
     if stealing {
-      let depth(pieces) = pieces.fold(0pt, (sum, piece) => sum + piece.size)
       if boundary > 0 {
-        shave-bottom.insert(str(boundary - 1), take(depth(gap.before), padding.bottom))
+        shave-bottom.insert(str(boundary - 1), take(seated.from-cells.before, room-bottom.at(str(boundary - 1), default: 0pt)))
       }
       if boundary < nrows {
-        shave-top.insert(str(boundary), take(depth(gap.after), padding.top))
+        shave-top.insert(str(boundary), take(seated.from-cells.after, room-top.at(str(boundary), default: 0pt)))
       }
     }
-    hline-spaced.insert(at, gap)
+    hline-spaced.insert(at, seated.gap)
   }
 
   let vline-spaced = (:)
   for (at, rules) in vrules {
     let boundary = int(at)
     let stops(side) = every(hrules).map(h => hline-stop(h, boundary, side))
+    // Air a vertical rule keeps only if it was asked to, since otherwise it
+    // costs the table no width unless something stops short of it.
+    let air = if vertical-space {
+      rules.map(v => cut-of(v, v.at, none))
+    } else { ((left: 0pt, right: 0pt),) }
     let gap = (
-      before: _split(stops("before"), 0pt),
-      after: _split(stops("after"), 0pt),
+      before: _split(stops("before"), widest(air.map(a => a.left))),
+      after: _split(stops("after"), widest(air.map(a => a.right))),
     )
 
     let wants = rules.map(steals)
@@ -587,16 +811,26 @@
           + "settle it.",
       )
     }
+    let size = gutter-at(column-gutters, boundary, ncols)
+    let half = _half-gap(size)
+    if half == none {
+      notes.push(
+        "the column-gutter " + repr(size) + " between columns " + str(boundary)
+          + " and " + str(boundary + 1) + " is not a length, which cannot be split "
+          + "around a rule, so none is kept there.",
+      )
+      half = 0pt
+    }
+    let seated = seat(gap, half, stealing)
     if stealing {
-      let depth(pieces) = pieces.fold(0pt, (sum, piece) => sum + piece.size)
       if boundary > 0 {
-        shave-right.insert(str(boundary - 1), take(depth(gap.before), padding.right))
+        shave-right.insert(str(boundary - 1), take(seated.from-cells.before, room-right.at(str(boundary - 1), default: 0pt)))
       }
       if boundary < ncols {
-        shave-left.insert(str(boundary), take(depth(gap.after), padding.left))
+        shave-left.insert(str(boundary), take(seated.from-cells.after, room-left.at(str(boundary), default: 0pt)))
       }
     }
-    vline-spaced.insert(at, gap)
+    vline-spaced.insert(at, seated.gap)
   }
 
   let rows-plan = _plan-axis(hline-spaced, nrows)
@@ -660,8 +894,7 @@
 
   // What a cell is left with once the rules beside it have taken their gap.
   let shaved(cell) = {
-    let own = cell.body.fields().at("inset", default: none)
-    let base = if own == none { padding } else { _sides(own) }
+    let base = padding-of(cell)
     let less = (
       top: shave-top.at(str(cell.row), default: 0pt),
       bottom: shave-bottom.at(str(cell.row + cell.rowspan - 1), default: 0pt),
@@ -694,19 +927,6 @@
     if cell.body.func() == table.cell { cell.body.body } else { cell.body },
   )
 
-  // How far each cell reaches in the laid-out grid, by where it starts, so the
-  // table's outer rules can be drawn on the edge a spanning cell ends at.
-  let extent = (:)
-  for cell in content.cells {
-    extent.insert(
-      str(placed-col.at(str(cell.column))) + "," + str(placed-row.at(str(cell.row))),
-      placed-span(cell),
-    )
-  }
-  let extent-at(x, y) = extent.at(
-    str(x) + "," + str(y),
-    default: (colspan: 1, rowspan: 1),
-  )
   // The first column of a laid-out row that no cell covers, which is where a
   // placeholder can sit without landing on a span.
   let free-column(y) = {
@@ -741,47 +961,146 @@
   }
   let placed-at(cell) = placed-row.at(str(cell.row))
 
-  let part(wrap, options, rows, cells) = if cells.len() == 0 { () } else {
-    (wrap(..options, ..anchors(rows), ..cells.map(place-cell)),)
+  // The authored tracks keep the sizes the author gave them, and the blank
+  // ones between them are as wide as the gap they stand for.
+  let sizes(plan, spec, count) = {
+    let authored = _track-sizes(spec, count)
+    plan.tracks.map(track => if type(track) == int { authored.at(track) } else { track })
   }
-  let sizes(plan) = plan.tracks.map(track => if type(track) == int { auto } else { track })
+
+  // What the author said about cells, put into terms of the grid built here.
+  let options = _options(
+    it, "children", "stroke", "rows", "columns", "row-gutter", "column-gutter",
+  )
+  // A gutter the author asked for stays a gutter of Typst's where nothing stands
+  // in it, between two neighbouring authored tracks, and is nothing beside the
+  // blank tracks, which hold the rest of it where a rule does stand in it.
+  let gutter-array(plan, gutters) = range(plan.tracks.len() - 1).map(index => {
+    let (here, next) = (plan.tracks.at(index), plan.tracks.at(index + 1))
+    if type(here) == int and type(next) == int { gutters.at(here) } else { 0pt }
+  })
+  let spaced = (:)
+  for (name, plan, gutters) in (
+    ("column-gutter", cols-plan, column-gutters),
+    ("row-gutter", rows-plan, row-gutters),
+  ) {
+    let array = gutter-array(plan, gutters)
+    if array.any(gap => gap != 0pt) { spaced.insert(name, array) }
+  }
+  // The room that became a gutter beside a rule belongs to no cell, so a fill
+  // that is one value for the whole table is answered for as well, to keep it out.
+  let has-gutter = (rows-plan, cols-plan).any(plan => {
+    plan.belongs.values().any(here => here.gutter)
+  })
+  for (name, neutral) in (fill: none, align: auto, inset: 0pt) {
+    if name in options {
+      options.insert(
+        name,
+        _remap(
+          options.at(name), rows-plan, cols-plan, nrows, ncols, neutral,
+          every: name == "fill" and has-gutter,
+        ),
+      )
+    }
+  }
+
+  // The rules, as native lines over the laid-out grid. A line is drawn wherever
+  // a rule covers a track, so each rule becomes one line per unbroken run of
+  // tracks. Native lines cross whatever lies between the tracks, and stop at a
+  // spanning cell as a cell's own stroke would.
+  let runs(count, stroke-at) = {
+    let found = ()
+    let begin = none
+    let current = none
+    for index in range(count + 1) {
+      let drawn = if index < count { stroke-at(index) } else { none }
+      if begin != none and drawn != current {
+        found.push((begin, index, current))
+        begin = none
+      }
+      if begin == none and drawn != none { begin = index; current = drawn }
+    }
+    found
+  }
+  let ntracks-x = cols-plan.tracks.len()
+  let ntracks-y = rows-plan.tracks.len()
+
+  let hlines = ()
+  let hline-rows = range(ntracks-y).map(y => (y, hrule-at(y)))
+  if rows-plan.trailing != none {
+    hline-rows.push((ntracks-y, hrules.at(str(rows-plan.trailing))))
+  }
+  for (y, rules) in hline-rows {
+    if rules.len() > 0 {
+      for (begin, end, drawn) in runs(ntracks-x, x => horizontal(rules, x)) {
+        hlines.push((y: y, start: begin, end: end, stroke: drawn))
+      }
+    }
+  }
+  let vlines = ()
+  let vline-cols = range(ntracks-x).map(x => (x, vrule-at(x)))
+  if cols-plan.trailing != none {
+    vline-cols.push((ntracks-x, vrules.at(str(cols-plan.trailing))))
+  }
+  for (x, rules) in vline-cols {
+    if rules.len() > 0 {
+      for (begin, end, drawn) in runs(ntracks-y, y => vertical-at(rules, y)) {
+        vlines.push((x: x, start: begin, end: end, stroke: drawn))
+      }
+    }
+  }
+
+  // A header and a footer carry the lines inside them when they repeat, so each
+  // line goes to the part that holds it. A vertical one running through more
+  // than one part is cut at the part's edge.
+  let header-cells = content.cells.filter(cell => placed-at(cell) < head-until)
+  let footer-cells = content.cells.filter(cell => placed-at(cell) >= foot-from)
+  let has-header = header-cells.len() > 0
+  let has-footer = footer-cells.len() > 0
+  let header-rows = if has-header { (0, head-until) } else { (0, 0) }
+  let footer-rows = if has-footer { (foot-from, ntracks-y) } else { (ntracks-y + 1, ntracks-y + 1) }
+  let body-rows = (header-rows.at(1), footer-rows.at(0))
+
+  let hlines-in(rows, last: false) = hlines
+    .filter(line => rows.at(0) <= line.y and (line.y < rows.at(1) or (last and line.y == rows.at(1))))
+    .map(line => table.hline(..line))
+  let vlines-in(rows) = vlines
+    .map(line => (..line, start: calc.max(line.start, rows.at(0)), end: calc.min(line.end, rows.at(1))))
+    .filter(line => line.start < line.end)
+    .map(line => table.vline(..line))
+
+  let part(wrap, options, rows, cells, lines) = if cells.len() == 0 { () } else {
+    (wrap(..options, ..anchors(rows), ..cells.map(place-cell), ..lines),)
+  }
 
   notes.map(_warn).join()
   table(
-    rows: sizes(rows-plan),
-    columns: sizes(cols-plan).enumerate().map(((index, size)) => if size != auto {
-      size
-    } else if type(it.columns) == array {
-      it.columns.at(cols-plan.tracks.at(index))
-    } else { auto }),
-    stroke: (x, y) => (
-      top: horizontal(hrule-at(y), x),
-      bottom: if y + extent-at(x, y).rowspan - 1 == rows-plan.last
-        and rows-plan.trailing != none {
-        horizontal(hrules.at(str(rows-plan.trailing)), x)
-      },
-      left: vertical-at(vrule-at(x), y),
-      right: if x + extent-at(x, y).colspan - 1 == cols-plan.last
-        and cols-plan.trailing != none {
-        vertical-at(vrules.at(str(cols-plan.trailing)), y)
-      },
-    ),
-    .._options(it, "children", "stroke", "rows", "columns", "row-gutter"),
+    rows: sizes(rows-plan, it.fields().at("rows", default: auto), nrows),
+    columns: sizes(cols-plan, it.fields().at("columns", default: auto), ncols),
+    ..options,
+    ..spaced,
+    // Nothing is drawn by cell strokes, and none of the default grid either. It
+    // follows the options so as to be the one that counts, being what a table
+    // already given the look is told apart by.
+    stroke: _output-stroke,
     ..part(
       table.header,
       if content.header == none { (:) } else { content.header.options },
       range(head-until),
-      content.cells.filter(cell => placed-at(cell) < head-until),
+      header-cells,
+      hlines-in(header-rows) + vlines-in(header-rows),
     ),
     ..content
       .cells
       .filter(cell => head-until <= placed-at(cell) and placed-at(cell) < foot-from)
       .map(place-cell),
+    ..hlines-in(body-rows) + vlines-in(body-rows),
     ..part(
       table.footer,
       if content.footer == none { (:) } else { content.footer.options },
-      range(foot-from, rows-plan.tracks.len()),
-      content.cells.filter(cell => placed-at(cell) >= foot-from),
+      range(foot-from, ntracks-y),
+      footer-cells,
+      hlines-in(footer-rows, last: true) + vlines-in(footer-rows),
     ),
   )
 }

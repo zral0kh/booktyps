@@ -1,4 +1,4 @@
-// Read the strokes straight off the laid-out table, which pins what a
+// Read the rules straight off the laid-out table, which pins what a
 // reference image can only show: a rule is interrupted where it is genuinely
 // cut, and nowhere else. `booktabs` is called here rather than shown, so that
 // the table it returns can be inspected; the calls sit in a `context` because
@@ -11,13 +11,7 @@
 #let height(it) = it.rows.len()
 
 /// The laid-out column a vertical rule was drawn in, found by looking for one.
-#let vline-column(it) = {
-  let found = ()
-  for x in range(width(it)) {
-    if range(height(it)).any(y => (it.stroke)(x, y).left != none) { found.push(x) }
-  }
-  found
-}
+#let vline-column(it) = lines-of(it, table.vline).map(line => line.x).dedup()
 
 // A vertical rule spanning every row touches the heavy rules closing the table
 // but never crosses them, so those must run the whole way across.
@@ -31,12 +25,12 @@
   let last = height(it) - 1
   for x in range(width(it)) {
     assert(
-      (it.stroke)(x, 0).top != none,
+      hline-covers(it, 0, x),
       message: "the top rule should reach across column " + str(x)
         + ", which the vertical rule only touches",
     )
     assert(
-      (it.stroke)(x, last).bottom != none,
+      hline-covers(it, last + 1, x),
       message: "the bottom rule should reach across column " + str(x),
     )
   }
@@ -60,7 +54,7 @@
   let x = columns.first()
   for y in range(1, height(it) - 1) {
     assert(
-      (it.stroke)(x, y).left != none,
+      vline-covers(it, x, y),
       message: "the vertical rule should run through row " + str(y)
         + ": the horizontal rule starts at it and so never cuts it",
     )
@@ -79,7 +73,7 @@
     [a], [b], [c], [d],
   ))
   let x = vline-column(it).first()
-  let gaps = range(1, height(it) - 1).filter(y => (it.stroke)(x, y).left == none)
+  let gaps = range(1, height(it) - 1).filter(y => not vline-covers(it, x, y))
   assert.eq(
     gaps.len(), 2,
     message: "a cut vertical rule should be absent from exactly the two blank "

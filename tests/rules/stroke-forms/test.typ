@@ -42,16 +42,9 @@
     table.hline(y: 1, stroke: 0.6pt + red),
     [a], [b], [c], [a], [b], [c],
   ))
-  let strokes = ()
-  for x in range(it.columns.len()) {
-    for yy in range(it.rows.len()) {
-      let cell = (it.stroke)(x, yy)
-      for side in ("top", "left") {
-        let s = cell.at(side)
-        if s != none { strokes.push(stroke(s).paint) }
-      }
-    }
-  }
+  let strokes = (
+    lines-of(it, table.hline) + lines-of(it, table.vline)
+  ).map(line => stroke(line.stroke).paint)
   assert(blue in strokes, message: "the vertical rule should keep its paint")
   assert(red in strokes, message: "the horizontal rule should keep its paint")
 }
