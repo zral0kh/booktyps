@@ -8,7 +8,7 @@ proper breaking of rules where they cross. Use native Typst table syntax: `table
 ## Usage
 
 ```typst
-#import "@preview/booktyps:0.1.0": booktabs
+#import "@preview/booktyps:0.1.1": booktabs
 
 #show table: booktabs
 // the code for the image above
@@ -196,7 +196,7 @@ are positional: the column and row the rules meet at, then the two instantiated 
 
 ## Examples
 
-See the [Github Examples](https://github.com/zral0kh/booktyps/tree/v0.1.0/examples) for more use cases.
+See the [Github Examples](https://github.com/zral0kh/booktyps/tree/v0.1.1/examples) for more use cases.
  
 | file | shows |
 |---|---|

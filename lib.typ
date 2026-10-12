@@ -390,7 +390,7 @@
 ///
 /// Example:
 /// ```typ
-/// #import "@preview/booktyps:0.1.0": booktabs
+/// #import "@preview/booktyps:0.1.1": booktabs
 /// #show table: booktabs.with(heavy: 1.3pt)
 ///
 /// #table(
